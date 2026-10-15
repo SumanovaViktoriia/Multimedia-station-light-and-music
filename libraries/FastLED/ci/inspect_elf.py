@@ -1,0 +1,103 @@
+import argparse
+import json
+from pathlib import Path
+
+from ci.util.elf import dump_symbol_sizes
+from ci.util.firmware_elf import resolve_firmware_elf
+from ci.util.global_interrupt_handler import handle_keyboard_interrupt
+
+
+HERE = Path(__file__).resolve().parent
+PROJECT_ROOT = HERE.parent
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Inspect a compiled binary")
+    parser.add_argument("--first", action="store_true", help="Inspect the first board")
+    parser.add_argument("--cwd", type=str, help="Custom working directory")
+    parser.add_argument("--elf", type=str, help="Path to the ELF file to inspect")
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    if args.elf:
+        firmware_path = Path(args.elf)
+        if not firmware_path.exists():
+            print(f"ELF file not found: {firmware_path}")
+            return 1
+
+    if args.cwd:
+        # os.chdir(args.cwd)
+        root_build_dir = Path(args.cwd) / ".build"
+    else:
+        root_build_dir = Path(".build")
+
+    # Board builds live under .build/fbuild/<board>
+    nested_board_dir = root_build_dir / "fbuild"
+    if nested_board_dir.is_dir():
+        root_build_dir = nested_board_dir
+
+    # Find the first board directory
+    board_dirs = [d for d in root_build_dir.iterdir() if d.is_dir()]
+    if not board_dirs:
+        # print("No board directories found in .build")
+        print(f"No board directories found in {root_build_dir.absolute()}")
+        return 1
+
+    # display all the boards to the user and ask them to select which one they want by number
+    print("Available boards:")
+    for i, board_dir in enumerate(board_dirs):
+        print(f"[{i}]: {board_dir.name}")
+
+    if args.first:
+        which = 0
+    else:
+        which = int(input("Enter the number of the board you want to inspect: "))
+
+    board_dir = board_dirs[which]
+    board = board_dir.name
+
+    # Find build_info.json (try example-specific files first, then generic)
+    build_info_files = list(board_dir.glob("build_info_*.json"))
+    if build_info_files:
+        # Prefer example-specific files
+        build_info_json = build_info_files[0]
+    else:
+        # Fall back to generic build_info.json
+        build_info_json = board_dir / "build_info.json"
+
+    if not build_info_json.exists():
+        print(f"Error: No build_info*.json found in {board_dir}")
+        return 1
+
+    build_info = json.loads(build_info_json.read_text())
+    board_info = build_info.get(board) or build_info[next(iter(build_info))]
+
+    # See ci/util/firmware_elf.py: `prog_path` is not where fbuild writes.
+    firmware_path = resolve_firmware_elf(board_info, board_dir)
+    if firmware_path is None:
+        print(
+            f"Error: no firmware ELF found for {board}. Looked for an fbuild "
+            f"artifact under {board_dir / '.fbuild' / 'build'} and at "
+            f"prog_path '{board_info.get('prog_path', '')}'."
+        )
+        return 1
+    cpp_filt_path = Path(board_info["aliases"]["c++filt"])
+
+    print(f"Dumping symbol sizes for {board} firmware: {firmware_path}")
+    try:
+        nm_path = Path(board_info["aliases"]["nm"])
+        symbol_sizes = dump_symbol_sizes(nm_path, cpp_filt_path, firmware_path)
+        print(symbol_sizes)
+    except KeyboardInterrupt as ki:
+        handle_keyboard_interrupt(ki)
+        raise
+    except Exception as e:
+        print(f"Error while dumping symbol sizes: {e}")
+
+    return 0
+
+
+if __name__ == "__main__":
+    main()

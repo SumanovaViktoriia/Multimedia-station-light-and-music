@@ -295,7 +295,10 @@ class StopKey:
 
             stop = False
             while msvcrt.kbhit():
-                if msvcrt.getwch() in STOP_CHARS:
+                ch = msvcrt.getwch()
+                if ch in ("\x00", "\xe0"):   # стрелки, F1…: за ними идёт ещё один код, не буква
+                    msvcrt.getwch()
+                elif ch in STOP_CHARS:
                     stop = True
             return stop
 

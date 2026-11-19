@@ -13,7 +13,7 @@ num_leds = 50
 max_bright = 100              # яркость канала 0..255; с блоком 2 А не выше 100
 
 [music]
-folder = "music"
+folder = "music"              # папка с mp3; внутри проекта или полный путь. Windows: 'C:\Музыка' — в ОДИНАРНЫХ кавычках
 track = ""                    # пусто — меню. Или имя / часть имени: "кукла"
 mode = "rainbow"              # rainbow | center | strobe | fft_bands | fft_dynamic | fft_beat_pulse
 sensitivity = 10.0            # 10 — обычно, больше — сильнее мигает

@@ -92,7 +92,10 @@ def load(path: Path = SETTINGS_FILE) -> Settings:
             # utf-8-sig: Блокнот на Windows может дописать BOM в начало файла
             raw = tomllib.loads(path.read_text(encoding="utf-8-sig"))
         except (tomllib.TOMLDecodeError, UnicodeDecodeError) as e:
-            raise SettingsError(f"settings.toml не читается: {e}") from None
+            hint = ""
+            if "\\" in str(e):
+                hint = "\nПути Windows с \\ пиши в одинарных кавычках: folder = 'C:\\Музыка'"
+            raise SettingsError(f"settings.toml не читается: {e}{hint}") from None
     else:
         print(f"Нет файла {path.name}, беру настройки по умолчанию.")
 

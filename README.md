@@ -5,10 +5,12 @@
 ## Запуск
 
 - Linux: `./run.sh`
-- Windows: `run.bat` (можно двойным кликом)
+- Windows: `run.bat` (двойным кликом или `.\run.bat` в PowerShell, `.venv` активировать не надо).
+  Нужен Python с python.org; `python` из MSYS2/MinGW не подходит.
 
 Первый запуск сам ставит библиотеки. Ещё нужен `ffmpeg`
-(`sudo apt install ffmpeg` / `winget install ffmpeg`).
+(Linux: `sudo apt install ffmpeg`; Windows: `winget install Gyan.FFmpeg`, потом открыть
+новое окно терминала).
 
 Откроется меню треков из `music/`:
 

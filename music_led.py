@@ -1,45 +1,35 @@
-# source .venv/bin/activate
-# python music_led.py --mode center --file music/Сурганова_Перрон.mp3
-
 """
-Светомузыка: MP3 → колонки + WS2812B через Arduino (USB Serial).
+Эффекты ленты и анализ звука. Запуск — summary.py, настройки — settings.toml.
 
-Протокол: b'LED' + NUM_LEDS*3 байт (R,G,B). Яркость канала ≤ MAX_BRIGHT.
+Кадр эффекта: NUM_LEDS*3 байт (R,G,B). Яркость канала ≤ MAX_BRIGHT.
 """
 
 from __future__ import annotations
 
-import argparse
 import colorsys
-import os
 import time
 from typing import Callable
 
 import numpy as np
-import serial
-import sounddevice as sd
 from pydub import AudioSegment
 
-# --- Железо / протокол (не менять без нужды) ---
-PORT = "/dev/ttyACM0"
-BAUD = 115200
+# Число диодов и яркость приходят из settings.toml через configure()
 NUM_LEDS = 30
 MAX_BRIGHT = 100          # ~40% от 255, защита БП 2А
-BLOCKSIZE = 2048          # меньше нагрузка на Serial-буфер Uno
+BLOCKSIZE = 2048          # ~46 мс звука на кадр
 FRAME_BYTES = NUM_LEDS * 3
+NUM_FFT_BINS = 15         # половина ленты: центр = бас, края = верх
 
-# Состояние для эффектов, которым нужен контекст
+# Состояние для эффектов, которым нужен контекст (создаётся в reset)
 _frame = 0
 _prev_rms = 0.0
 _center_vol = 0.0
 _center_radius = 0.0
-_sample_rate = 44100
-_notes = None  # NoteTracker, создаётся в main
-_fft_bands = None  # FFTBandsAnalyzer, создаётся в main
-_fft_dynamic = None  # FFTDynamicAnalyzer, создаётся в main
-_fft_beat = None  # FFTBeatPulseAnalyzer, создаётся в main
+_notes = None  # NoteTracker
+_fft_bands = None  # FFTBandsAnalyzer
+_fft_dynamic = None  # FFTDynamicAnalyzer
+_fft_beat = None  # FFTBeatPulseAnalyzer
 
-NUM_FFT_BINS = 15  # зеркало на 30 LED: центр = бас, края = верх
 HUE_SHIFT_MULT = 0.42  # насколько громкий бин уходит в «тёплый» оттенок
 BASE_HUE_SPEED = 0.028  # скорость медленного дрейфа базового hue (оборот/сек ≈)
 FFT_DYNAMIC_BRIGHT = 1.22  # чуть ярче heatmap (value × множитель, всё ещё ≤ MAX_BRIGHT)
@@ -60,7 +50,7 @@ BEAT_KICK_OVER_VOICE = 1.75
 VERSE_VOICE_GATE = 0.42      # если voice выше — считаем «куплет»
 VERSE_KICK_MAX = 0.85        # и kick не доминирует над voice → без вспышки
 FLASH_DECAY = 0.82
-IMPACT_RGB = (100, 90, 55)
+IMPACT_RGB = (1.0, 0.9, 0.55)  # доли от MAX_BRIGHT
 
 
 # Имена нот (pitch class 0=C … 11=B)
@@ -247,9 +237,9 @@ class FFTBandsAnalyzer:
 
 class FFTDynamicAnalyzer:
     """
-    Зеркальный heatmap-спектр: 15 лог-бинов FFT → 30 LED.
+    Зеркальный heatmap-спектр: NUM_FFT_BINS лог-бинов FFT → вся лента.
 
-    Центр (LED 14/15) = низкие частоты, края (0 и 29) = высокие.
+    Центр ленты = низкие частоты, края = высокие.
     Цвет через colorsys HSV: медленный base_hue + сдвиг к «теплу» от амплитуды.
     Кадр RGB собирается здесь же (15 вызовов hsv_to_rgb), effect только отдаёт буфер.
     """
@@ -291,6 +281,9 @@ class FFTDynamicAnalyzer:
             mask = (freqs >= edges[i]) & (freqs < edges[i + 1])
             if np.any(mask):
                 raw[i] = float(np.mean(mag[mask]))
+            else:
+                # на длинной ленте бин уже шага FFT — берём значение между соседями
+                raw[i] = float(np.interp((edges[i] + edges[i + 1]) / 2, freqs, mag))
 
         # общий пик для нормировки (heatmap выглядит ровнее)
         energy = float(raw.max()) if raw.size else 0.0
@@ -320,9 +313,9 @@ class FFTDynamicAnalyzer:
             g = int(min(MAX_BRIGHT, round(g_f * scale)))
             b = int(min(MAX_BRIGHT, round(b_f * scale)))
 
-            # бин 0 → центр, бин 14 → края
-            left = 14 - i
-            right = 15 + i
+            # бин 0 → центр, последний бин → края
+            left = (NUM_LEDS - 1) // 2 - i
+            right = NUM_LEDS // 2 + i
             self.frame[left * 3 : left * 3 + 3] = bytes((r, g, b))
             self.frame[right * 3 : right * 3 + 3] = bytes((r, g, b))
 
@@ -426,8 +419,8 @@ class FFTBeatPulseAnalyzer(FFTDynamicAnalyzer):
         if self.flash_intensity < 0.02:
             return
 
-        half = (NUM_LEDS - 1) / 2.0
-        ir, ig, ib = IMPACT_RGB
+        half = max((NUM_LEDS - 1) / 2.0, 0.5)
+        ir, ig, ib = (c * MAX_BRIGHT for c in IMPACT_RGB)
         flash = self.flash_intensity
         for i in range(NUM_LEDS):
             t = abs(i - half) / half
@@ -591,7 +584,7 @@ def effect_fft_bands(rms_volume: float) -> bytearray:
     c_mids = (0.25, 0.90, 0.55)   # мята
     c_high = (0.35, 0.40, 1.00)   # лазурь с фиолетовинкой
 
-    half = (NUM_LEDS - 1) / 2.0
+    half = max((NUM_LEDS - 1) / 2.0, 0.5)
     for i in range(NUM_LEDS):
         # 0 в центре → 1 на краю
         t = abs(i - half) / half
@@ -646,40 +639,82 @@ EFFECTS: dict[str, Callable[[float], bytearray]] = {
 
 
 # ---------------------------------------------------------------------------
-# CLI / загрузка / I/O
+# Фон без музыки
 # ---------------------------------------------------------------------------
 
-def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Светомузыка для WS2812B через Arduino")
-    p.add_argument(
-        "--mode",
-        choices=list(EFFECTS.keys()),
-        default="center",
-        help="Режим визуализации",
-    )
-    p.add_argument(
-        "--file",
-        default="music/track.mp3",
-        help="Имя или путь к MP3 (если файла нет — ищем в music/)",
-    )
-    p.add_argument(
-        "--sensitivity",
-        type=float,
-        default=10.0,
-        help="Усиление после нормализации (10 = нейтрально, больше = злее)",
-    )
-    p.add_argument("--port", default=PORT, help="Serial-порт Arduino")
-    return p.parse_args()
+IDLE_MODES = ("off", "flow", "rainbow", "glow")
 
 
-def resolve_music_path(path: str) -> str:
-    """Сурганова_Перрон.mp3 → music/Сурганова_Перрон.mp3, если нужно."""
-    if os.path.isfile(path):
-        return path
-    in_music = os.path.join("music", os.path.basename(path))
-    if os.path.isfile(in_music):
-        return in_music
-    return path
+def idle_frame(mode: str, brightness: float, phase: float) -> bytearray:
+    """
+    phase — «время» фона в секундах (растёт тем быстрее, чем больше speed).
+    flow    — переливы: соседние цвета плавно перетекают, вся лента медленно меняет гамму
+    rainbow — бегущая радуга
+    glow    — мягкое свечение одним цветом
+    """
+    buf = empty_frame()
+    two_pi = 2.0 * np.pi
+    for i in range(NUM_LEDS):
+        x = i / NUM_LEDS   # 0..1 вдоль ленты, вид не зависит от числа диодов
+        if mode == "flow":
+            hue = (
+                phase * 0.025
+                + 0.16 * np.sin(two_pi * (1.3 * x) + phase * 0.55)
+                + 0.09 * np.sin(two_pi * (2.7 * x) - phase * 0.35)
+            )
+            sat = 0.85 + 0.15 * np.sin(two_pi * x + phase * 0.3)
+            val = brightness * (0.7 + 0.3 * np.sin(two_pi * (1.9 * x) - phase * 0.8))
+        elif mode == "rainbow":
+            hue = x + phase * 0.03
+            sat = 1.0
+            val = brightness
+        else:
+            hue = phase * 0.008 + 0.04 * np.sin(two_pi * x + phase * 0.3)
+            sat = 1.0
+            val = brightness * (0.75 + 0.25 * np.sin(phase * 0.9 - two_pi * x))
+        r, g, b = hsv_to_rgb(hue, sat, val)
+        set_led(buf, i, r, g, b)
+    return buf
+
+
+# ---------------------------------------------------------------------------
+# Настройка / анализ / загрузка
+# ---------------------------------------------------------------------------
+
+def configure(num_leds: int, max_bright: int) -> None:
+    """Длина ленты и предел яркости из settings.toml."""
+    global NUM_LEDS, MAX_BRIGHT, FRAME_BYTES, NUM_FFT_BINS
+    NUM_LEDS = num_leds
+    MAX_BRIGHT = max_bright
+    FRAME_BYTES = num_leds * 3
+    NUM_FFT_BINS = (num_leds + 1) // 2
+    reset()
+
+
+def reset() -> None:
+    """Чистое состояние эффектов перед треком."""
+    global _frame, _prev_rms, _center_vol, _center_radius
+    global _notes, _fft_bands, _fft_dynamic, _fft_beat
+    _frame = 0
+    _prev_rms = 0.0
+    _center_vol = 0.0
+    _center_radius = 0.0
+    _notes = NoteTracker()
+    _fft_bands = FFTBandsAnalyzer()
+    _fft_dynamic = FFTDynamicAnalyzer()
+    _fft_beat = FFTBeatPulseAnalyzer()
+
+
+def analyze(mode: str, chunk: np.ndarray, fs: int, sensitivity: float) -> None:
+    """Тяжёлый анализ — только тот, что нужен режиму."""
+    if mode == "fft_bands":
+        _fft_bands.update(chunk, fs, sensitivity)
+    elif mode == "fft_dynamic":
+        _fft_dynamic.update(chunk, fs, sensitivity)
+    elif mode == "fft_beat_pulse":
+        _fft_beat.update(chunk, fs, sensitivity)
+    else:
+        _notes.update(chunk, fs)
 
 
 def load_mp3(path: str) -> tuple[np.ndarray, int]:
@@ -694,110 +729,3 @@ def load_mp3(path: str) -> tuple[np.ndarray, int]:
     data = samples.astype(np.float32) / max_amp
     return data, int(audio.frame_rate)
 
-
-def blackout(ser: serial.Serial) -> None:
-    try:
-        ser.write_timeout = 1
-        ser.write(b"LED" + bytearray([0] * FRAME_BYTES))
-    except Exception:
-        pass
-
-
-def main() -> None:
-    global _notes, _sample_rate, _fft_bands, _fft_dynamic, _fft_beat
-    args = parse_args()
-    effect = EFFECTS[args.mode]
-
-    try:
-        ser = serial.Serial(args.port, BAUD, write_timeout=0)
-        time.sleep(2)
-        print(f"Arduino: {args.port} @ {BAUD}")
-    except Exception as e:
-        print(f"Не удалось открыть {args.port}: {e}")
-        return
-
-    try:
-        music_path = resolve_music_path(args.file)
-        print(f"Загрузка {music_path}...")
-        data, fs = load_mp3(music_path)
-        _sample_rate = fs
-        _notes = NoteTracker()
-        _fft_bands = FFTBandsAnalyzer()
-        _fft_dynamic = FFTDynamicAnalyzer()
-        _fft_beat = FFTBeatPulseAnalyzer()
-        print(f"OK: {len(data)} сэмплов, {fs} Hz, mode={args.mode}")
-        if args.mode == "fft_bands":
-            print("FFT: bass/mids/highs → мягкий градиент (коралл / мята / лазурь)")
-        elif args.mode == "fft_dynamic":
-            print("FFT dynamic: зеркальный heatmap, hue плывёт + теплеет от громкости бина")
-        elif args.mode == "fft_beat_pulse":
-            print("Club: fft_dynamic + bass onset → золотая вспышка от центра")
-        else:
-            print("Цвет: C=красный … по кругу до B (доминирующая нота / хрома)")
-    except Exception as e:
-        print(f"Ошибка MP3: {e}")
-        ser.close()
-        return
-
-    current_frame = 0
-    finished = False
-    normalizer = VolumeNormalizer()
-
-    def audio_callback(outdata, frames, time_info, status):
-        nonlocal current_frame, finished
-
-        chunk = data[current_frame : current_frame + frames]
-        if len(chunk) < frames:
-            outdata[: len(chunk)] = chunk
-            outdata[len(chunk) :] = 0
-            current_frame += len(chunk)
-            finished = True
-            raise sd.CallbackStop()
-
-        outdata[:] = chunk
-        current_frame += frames
-
-        # Тяжёлый анализ — только для нужного режима
-        if args.mode == "fft_bands":
-            _fft_bands.update(chunk, fs, args.sensitivity)
-        elif args.mode == "fft_dynamic":
-            _fft_dynamic.update(chunk, fs, args.sensitivity)
-        elif args.mode == "fft_beat_pulse":
-            _fft_beat.update(chunk, fs, args.sensitivity)
-        else:
-            _notes.update(chunk, fs)
-
-        volume = normalizer.process(chunk, args.sensitivity)
-        led_data = effect(volume)
-        try:
-            ser.write(b"LED")
-            ser.write(led_data)
-        except (serial.SerialTimeoutException, serial.SerialException, OSError):
-            try:
-                ser.reset_output_buffer()
-            except Exception:
-                pass
-
-    print("Воспроизведение… Ctrl+C — стоп")
-    try:
-        with sd.OutputStream(
-            samplerate=fs,
-            channels=data.shape[1],
-            callback=audio_callback,
-            blocksize=BLOCKSIZE,
-        ):
-            while not finished and current_frame < len(data):
-                time.sleep(0.1)
-        print("Трек завершён")
-    except KeyboardInterrupt:
-        print("\nОстановка…")
-    finally:
-        blackout(ser)
-        try:
-            ser.close()
-        except Exception:
-            pass
-
-
-if __name__ == "__main__":
-    main()

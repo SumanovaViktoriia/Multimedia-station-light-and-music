@@ -1,0 +1,36 @@
+# Настройки светомузыки. После правки перезапусти программу.
+
+[system]
+os = "auto"                   # auto | linux | windows
+port_linux = "/dev/ttyACM0"   # можно "auto" — найдёт Arduino сам
+port_windows = "COM5"
+
+[strip]
+# Сколько диодов ленты горит (считая от начала).
+# Меньше или столько же, сколько MAX_LEDS в скетче, — прошивать Arduino не надо.
+# Больше — увеличь MAX_LEDS в music_led/music_led.ino и перезалей скетч.
+num_leds = 50
+max_bright = 100              # яркость канала 0..255; с блоком 2 А не выше 100
+
+[music]
+folder = "music"
+track = ""                    # пусто — меню. Или имя / часть имени: "кукла"
+mode = "rainbow"              # rainbow | center | strobe | fft_bands | fft_dynamic | fft_beat_pulse
+sensitivity = 10.0            # 10 — обычно, больше — сильнее мигает
+autoplay = true               # после трека сам включить следующий (по кругу)
+shuffle = false               # true — следующий трек случайный
+next_delay = 5.0              # секунд до следующего трека; за это время Enter — в меню
+
+[led]                         # обычный диод, мигает на биты
+enabled = true
+
+[fog]                         # парогенератор: на сильный бас включается, через duration сам выключается
+enabled = true
+mult = 2.8                    # больше — реже туман
+cooldown = 8.0                # минимум секунд между пусками
+duration = 4.0                # сколько секунд идёт пар (0.1..20); новый дроп продлевает
+
+[idle]                        # фон, пока музыка не играет
+mode = "flow"                 # off | flow (переливы) | rainbow | glow
+brightness = 0.15             # 0..1
+speed = 1.0                   # 0.1..10, больше — быстрее переливается

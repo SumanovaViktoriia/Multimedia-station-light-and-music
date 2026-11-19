@@ -5,5 +5,6 @@
 *.a
 
 .venv/
+__pycache__/
 libraries/FastLED/
 music/

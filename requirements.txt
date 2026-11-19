@@ -1,0 +1,6 @@
+numpy
+pyserial
+sounddevice
+pydub
+tomli; python_version < "3.11"
+audioop-lts; python_version >= "3.13"
